@@ -113,11 +113,7 @@ app.get("/manifest.json", (req, res) => {
       type: c.type,
       id,
       name: c.name,
-      // "search" obbligatorio = catalogo nascosto dalla home (il valore viene ignorato)
-      extra: [
-        { name: "search", isRequired: true },
-        { name: "skip", isRequired: false },
-      ],
+      extra: [{ name: "skip", isRequired: false }],
     })),
   });
 });
