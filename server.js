@@ -16,7 +16,7 @@ const WATCH_IT = {
   with_watch_monetization_types: "flatrate|free|ads|rent|buy",
 };
 
-// pages: se presente, il catalogo carica N pagine TMDB in una volta (niente paginazione)
+// pages: carica N pagine TMDB in una volta (niente paginazione)
 // exclude: scarta titoli arabi e cinesi; noEnglish: scarta trame vuote o in inglese
 const CATALOGS = {
   "it-cinema": {
@@ -25,17 +25,11 @@ const CATALOGS = {
     path: "/movie/now_playing",
     params: () => ({ region: "IT" }),
   },
-  "it-film-prossimi": {
-    type: "movie",
-    name: "Prossime uscite film (Italia)",
-    path: "/movie/upcoming",
-    params: () => ({ region: "IT" }),
-  },
   "it-serie-ultime": {
     type: "series",
     name: "Ultime serie TV uscite in Italia",
     path: "/discover/tv",
-    pages: 3,
+    pages: 5,
     exclude: true,
     noEnglish: true,
     params: () => ({
@@ -43,18 +37,6 @@ const CATALOGS = {
       sort_by: "first_air_date.desc",
       "first_air_date.gte": iso(-120),
       "first_air_date.lte": iso(0),
-    }),
-  },
-  "it-serie-prossime": {
-    type: "series",
-    name: "Prossime serie TV",
-    path: "/discover/tv",
-    pages: 3,
-    exclude: true,
-    params: () => ({
-      sort_by: "popularity.desc",
-      "first_air_date.gte": iso(1),
-      "first_air_date.lte": iso(180),
     }),
   },
 };
@@ -126,14 +108,13 @@ function buildMeta(item, type, id) {
   };
 }
 
-// Se manca l'ID IMDb (tipico delle uscite future) usa "tmdb:ID" invece di scartare il titolo
 async function toMeta(item, type) {
   const kind = type === "movie" ? "movie" : "tv";
   let imdb;
   try {
     imdb = (await tmdb(`/${kind}/${item.id}/external_ids`)).imdb_id;
   } catch {}
-  return buildMeta(item, type, imdb || `tmdb:${item.id}`);
+  return imdb ? buildMeta(item, type, imdb) : null;
 }
 
 app.use((req, res, next) => {
@@ -145,14 +126,12 @@ app.use((req, res, next) => {
 app.get("/manifest.json", (req, res) => {
   res.json({
     id: "community.nuvio.uscite.italia",
-    version: "1.1.0",
+    version: "1.2.0",
     name: "Uscite Italia",
     description:
       "Film al cinema in Italia, prossime uscite e ultime serie TV (dati TMDB).",
-    resources: [
-      "catalog",
-      { name: "meta", types: ["movie", "series"], idPrefixes: ["tmdb:"] },
-    ],
+    resources: ["catalog"],
+    idPrefixes: ["tt"],
     types: ["movie", "series"],
     catalogs: Object.entries(CATALOGS).map(([id, c]) => ({
       type: c.type,
@@ -191,9 +170,11 @@ async function catalogHandler(req, res) {
     if (cat.exclude) results = results.filter((i) => !blocked(i));
     if (cat.noEnglish)
       results = results.filter((i) => i.overview && !looksEnglish(i.overview));
-    if (cat.pages) results = results.slice(0, 40);
+    if (cat.pages) results = results.slice(0, 60);
 
-    const metas = await Promise.all(results.map((i) => toMeta(i, cat.type)));
+    const metas = (
+      await Promise.all(results.map((i) => toMeta(i, cat.type)))
+    ).filter(Boolean);
     res.setHeader("Cache-Control", "public, max-age=3600");
     res.json({ metas });
   } catch (e) {
@@ -204,21 +185,6 @@ async function catalogHandler(req, res) {
 
 app.get("/catalog/:type/:id.json", catalogHandler);
 app.get("/catalog/:type/:id/:extra.json", catalogHandler);
-
-// Meta per i titoli senza ID IMDb (uscite future)
-app.get("/meta/:type/:id.json", async (req, res) => {
-  const { type, id } = req.params;
-  if (!id.startsWith("tmdb:")) return res.json({ meta: null });
-  try {
-    const kind = type === "movie" ? "movie" : "tv";
-    const d = await tmdb(`/${kind}/${id.slice(5)}`);
-    res.setHeader("Cache-Control", "public, max-age=3600");
-    res.json({ meta: buildMeta(d, type, id) });
-  } catch (e) {
-    console.error(e.message);
-    res.json({ meta: null });
-  }
-});
 
 app.get("/", (req, res) => {
   const base = `${req.protocol}://${req.get("host")}`;
