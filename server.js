@@ -1,4 +1,5 @@
 const express = require("express");
+const { composePoster } = require("./poster");
 
 const app = express();
 const PORT = process.env.PORT || 7000;
@@ -39,6 +40,28 @@ const CATALOGS = {
       "first_air_date.lte": iso(0),
     }),
   },
+  // Top 10 del giorno (trending TMDB) con poster numerati
+  "it-top10-film": {
+    type: "movie",
+    name: "Top 10 - Film",
+    path: "/trending/movie/day",
+    pages: 2,
+    top: 10,
+    exclude: true,
+    ranked: true,
+    params: () => ({}),
+  },
+  "it-top10-serie": {
+    type: "series",
+    name: "Top 10 - Serie",
+    path: "/trending/tv/day",
+    pages: 2,
+    top: 10,
+    exclude: true,
+    noEnglish: true,
+    ranked: true,
+    params: () => ({}),
+  },
 };
 
 // ---- filtri ----
@@ -53,7 +76,7 @@ const ARABIC_SCRIPT = /[\u0600-\u06FF\u0750-\u077F]/;
 const blocked = (i) =>
   BLOCK_LANG.has(i.original_language) ||
   (i.origin_country || []).some((c) => BLOCK_COUNTRIES.has(c)) ||
-  ARABIC_SCRIPT.test(i.name || "");
+  ARABIC_SCRIPT.test(i.name || i.title || "");
 
 const EN_WORDS = new Set(
   "the and of to is with her his for on that as who are an from after when their into this they".split(" ")
@@ -92,13 +115,13 @@ async function tmdb(path, params = {}) {
   return v;
 }
 
-function buildMeta(item, type, id) {
+function buildMeta(item, type, id, poster) {
   const date = item.release_date || item.first_air_date || "";
   return {
     id,
     type,
     name: item.title || item.name,
-    poster: item.poster_path ? `${IMG}/w500${item.poster_path}` : undefined,
+    poster: poster || (item.poster_path ? `${IMG}/w500${item.poster_path}` : undefined),
     background: item.backdrop_path ? `${IMG}/w1280${item.backdrop_path}` : undefined,
     description: item.overview || undefined,
     releaseInfo: date ? date.slice(0, 4) : undefined,
@@ -108,13 +131,13 @@ function buildMeta(item, type, id) {
   };
 }
 
-async function toMeta(item, type) {
+async function toMeta(item, type, posterUrl) {
   const kind = type === "movie" ? "movie" : "tv";
   let imdb;
   try {
     imdb = (await tmdb(`/${kind}/${item.id}/external_ids`)).imdb_id;
   } catch {}
-  return imdb ? buildMeta(item, type, imdb) : null;
+  return imdb ? buildMeta(item, type, imdb, posterUrl) : null;
 }
 
 app.use((req, res, next) => {
@@ -126,10 +149,10 @@ app.use((req, res, next) => {
 app.get("/manifest.json", (req, res) => {
   res.json({
     id: "community.nuvio.uscite.italia",
-    version: "1.2.0",
+    version: "1.3.0",
     name: "Uscite Italia",
     description:
-      "Film al cinema in Italia, prossime uscite e ultime serie TV (dati TMDB).",
+      "Film al cinema in Italia, ultime serie TV e Top 10 del giorno (dati TMDB).",
     resources: ["catalog"],
     idPrefixes: ["tt"],
     types: ["movie", "series"],
@@ -170,10 +193,20 @@ async function catalogHandler(req, res) {
     if (cat.exclude) results = results.filter((i) => !blocked(i));
     if (cat.noEnglish)
       results = results.filter((i) => i.overview && !looksEnglish(i.overview));
-    if (cat.pages) results = results.slice(0, 60);
+    if (cat.pages) results = results.slice(0, cat.top || 60);
 
     const metas = (
-      await Promise.all(results.map((i) => toMeta(i, cat.type)))
+      await Promise.all(
+        results.map((i, n) =>
+          toMeta(
+            i,
+            cat.type,
+            cat.ranked
+              ? `${baseUrl(req)}/poster/${cat.type === "movie" ? "movie" : "tv"}/${i.id}/${n + 1}.jpg`
+              : undefined
+          )
+        )
+      )
     ).filter(Boolean);
     res.setHeader("Cache-Control", "public, max-age=3600");
     res.json({ metas });
@@ -185,6 +218,64 @@ async function catalogHandler(req, res) {
 
 app.get("/catalog/:type/:id.json", catalogHandler);
 app.get("/catalog/:type/:id/:extra.json", catalogHandler);
+
+
+// ---- poster numerati ----
+const baseUrl = (req) =>
+  process.env.PUBLIC_URL ||
+  `${req.get("x-forwarded-proto") || req.protocol}://${req.get("host")}`;
+
+const GENRE_IT = {
+  "Action & Adventure": "Azione e Avventura",
+  "Sci-Fi & Fantasy": "Fantascienza e Fantasy",
+  "War & Politics": "Guerra e Politica",
+  "Science Fiction": "Fantascienza",
+  Kids: "Bambini",
+  News: "Notizie",
+  Reality: "Reality",
+  Soap: "Soap",
+  Talk: "Talk show",
+  Documentary: "Documentario",
+};
+
+const posterCache = new Map(); // chiave -> { t, buf } (max 150 elementi)
+const POSTER_MAX = 150;
+
+app.get("/poster/:kind/:id/:rank.jpg", async (req, res) => {
+  const { kind, id } = req.params;
+  const rank = parseInt(req.params.rank, 10);
+  if (!["movie", "tv"].includes(kind) || !/^\d+$/.test(id) || !(rank >= 1 && rank <= 99))
+    return res.status(400).end();
+
+  const key = `${kind}/${id}/${rank}`;
+  const hit = posterCache.get(key);
+  if (hit && Date.now() - hit.t < TTL) {
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Cache-Control", "public, max-age=21600");
+    return res.send(hit.buf);
+  }
+
+  try {
+    const d = await tmdb(`/${kind}/${id}`);
+    if (!d.poster_path) return res.status(404).end();
+    const r = await fetch(`${IMG}/w500${d.poster_path}`);
+    if (!r.ok) throw new Error(`poster ${r.status}`);
+    const raw = Buffer.from(await r.arrayBuffer());
+    const g = d.genres && d.genres[0] ? d.genres[0].name : "";
+    const buf = await composePoster(raw, rank, GENRE_IT[g] || g);
+
+    if (posterCache.size >= POSTER_MAX)
+      posterCache.delete(posterCache.keys().next().value);
+    posterCache.set(key, { t: Date.now(), buf });
+
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Cache-Control", "public, max-age=21600");
+    res.send(buf);
+  } catch (e) {
+    console.error("poster:", e.message);
+    res.status(502).end();
+  }
+});
 
 app.get("/", (req, res) => {
   const base = `${req.protocol}://${req.get("host")}`;

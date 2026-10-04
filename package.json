@@ -1,15 +1,16 @@
 {
   "name": "nuvio-uscite-italia",
   "version": "1.0.0",
-  "description": "Addon Nuvio: film al cinema in Italia, prossime uscite e ultime serie TV (TMDB)",
+  "description": "Addon Nuvio: film al cinema in Italia, ultime serie TV e Top 10 del giorno (TMDB)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.17"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "sharp": "^0.34.5"
   }
 }
